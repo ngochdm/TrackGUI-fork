@@ -18,6 +18,8 @@ from qtpy.QtCore import Qt
 from labelme import PY2
 from labelme import __appname__
 from labelme.ai import MODELS
+from labelme.annotation_import import import_yolo_annotations
+from labelme.annotation_import import track_annotations
 from labelme.config import get_config
 from labelme.label_file import LabelFile
 from labelme.label_file import LabelFileError
@@ -41,14 +43,13 @@ from labelme.widgets import DeletionDialog
 from labelme.widgets import ToolBar
 from labelme.widgets import UniqueLabelQListWidget
 from labelme.widgets import ZoomWidget
+from labelme.widgets.yolo_import_dialog import YoloImportDialog
+from labelme.yolo import load_class_names
 
 from . import utils
 
 import numpy as np
 import json
-from labelme.track_algo import SORT_main
-from labelme.track_algo import KalmanBoxTracker
-from scipy.optimize import linear_sum_assignment
 
 # FIXME
 # - [medium] Set max zoom value to something big enough for FitWidth/Window
@@ -294,6 +295,14 @@ class MainWindow(QtWidgets.QMainWindow):
             shortcuts["open_dir"],
             "open",
             self.tr("Open Dir"),
+        )
+        importYolo = action(
+            self.tr("Import YOLO Detections…"),
+            self.importYOLO,
+            None,
+            "open",
+            self.tr("Import YOLO TXT boxes and optionally assign tracking IDs"),
+            enabled=False,
         )
         openNextImg = action(
             self.tr("&Next Image"),
@@ -733,6 +742,7 @@ class MainWindow(QtWidgets.QMainWindow):
             save=save,
             saveAs=saveAs,
             open=open_,
+            importYolo=importYolo,
             close=close,
             deleteFile=deleteFile,
             toggleKeepPrevMode=toggle_keep_prev_mode,
@@ -809,6 +819,7 @@ class MainWindow(QtWidgets.QMainWindow):
             ),
             onLoadActive=(
                 close,
+                importYolo,
                 createMode,
                 createRectangleMode,
                 createCircleMode,
@@ -843,6 +854,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 openNextImg,
                 openPrevImg,
                 opendir,
+                importYolo,
                 self.menus.recentFiles,
                 save,
                 saveAs,
@@ -883,7 +895,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         utils.addActions(
             self.menus.track,
-            (call_interpolation,call_sort,call_deletion),
+            (importYolo, None, call_interpolation, call_sort, call_deletion),
         )
 
         self.menus.file.aboutToShow.connect(self.updateFileMenu)
@@ -1232,140 +1244,128 @@ class MainWindow(QtWidgets.QMainWindow):
         self.interpolationrefine_list.statusBar.showMessage(f'Name: {self.ir_name} | ID: {self.ir_id}')
         
         
-    def SORT(self, item=None):
-        def convert(box):
-            w = abs(box[1][0] - box[0][0])
-            h = abs(box[1][1] - box[0][1])
-            return [box[0][0],box[0][1],w,h]
-
-        dialog = TrackDialog(
-            parent=self,
-        )
-        dialog.exec_()
-
-        # 3 modes
-        # + start by using the current frame's track annotation
-        # + start from scratch without track annotation
-        track_option = dialog.option_value
-        
-        # print frame shortage here
-        # ...
-
-        if track_option != 0:   
-            # get the index of current item
-            items = self.fileListWidget.selectedItems()
-            item = items[0]
-            currIndex = self.imageList.index(str(item.text()))
-
-            # get label list .json
-            if track_option == 1:   # start from beginning
-                labelList = [osp.splitext(img_p)[0] + ".json" for img_p in self.imageList]
-            else:
-                labelList = [osp.splitext(img_p)[0] + ".json" for img_p in self.imageList][currIndex:]
-            
-            # convert label to Track Evaluation
-            lines = []
-            frame_id = 1
-            for jdx, json_path in enumerate(labelList):
-                if jdx == 0:    # first frame 
-                    bboxes = [ [[self.IDList[idx].shape().points[0].x(),\
-                                self.IDList[idx].shape().points[0].y()],\
-                                [self.IDList[idx].shape().points[1].x(),\
-                                self.IDList[idx].shape().points[1].y()]]       for idx in range(len(self.IDList))]
-                    bboxes_xywh = [convert(bboxes[i]) for i in range(len(bboxes))]
-                    
-                    if track_option == 2: # start with current annotation
-                        track_ids = [self.IDList[idx].text() for idx in range(len(self.IDList))]
-                        int_track_ids = [int(self.IDList[idx].text()) for idx in range(len(self.IDList))]
-                        
-                        if '-1' in track_ids:
-                            self.errorMessage(
-                                "Track IDs",
-                                "You must label all objects' IDs.",
-                            )
-                            return
-                        for l in range(len(bboxes_xywh)):
-                            lines.append([frame_id,int(track_ids[l]),bboxes_xywh[l][0],bboxes_xywh[l][1],bboxes_xywh[l][2],bboxes_xywh[l][3],1,-1,-1,-1])
-                    else:   # start with NO annotation
-                        for l in range(len(bboxes_xywh)):
-                            lines.append([frame_id,-1,bboxes_xywh[l][0],bboxes_xywh[l][1],bboxes_xywh[l][2],bboxes_xywh[l][3],1,-1,-1,-1])
-                else:       # next frames # all ids are -1
-                    with open(json_path) as file:
-                        data = json.load(file)
-
-                    shapes = LabelFile.normalize_shapes(data["shapes"])
-                    bboxes = [shape["points"] for shape in shapes]
-                    # need boxes in x,y,w,h
-                    bboxes_xywh = [convert(bboxes[i]) for i in range(len(bboxes))]
-
-                    # frame_id, track_id, x_top_left, y_top_left, width, height,1,-1,-1,-1
-                    for l in range(len(bboxes_xywh)):
-                        lines.append([frame_id,-1,bboxes_xywh[l][0],bboxes_xywh[l][1],bboxes_xywh[l][2],bboxes_xywh[l][3],1,-1,-1,-1])
-                frame_id += 1
-            seq_dets = np.array(lines).astype(float)
-            
-            mot_tracker = SORT_main(max_age=10,min_hits=0,iou_threshold=0.3)
-            mot_tracker.trackers = []
-            KalmanBoxTracker.count = 0
-            track_results = []
-            if track_option == 2:
-                for idx in range(len(seq_dets[seq_dets[:, 0]==1])):
-                    dets = seq_dets[seq_dets[:, 0]==1,2:7][idx:idx+1]   # original setting: x,y,w,h top left width height
-                    det_id = seq_dets[seq_dets[:, 0]==1,1][idx]
-                    dets[:, 2:4] += dets[:, 0:2] #convert to [x1,y1,w,h] to [x1,y1,x2,y2]
-                    KalmanBoxTracker.count = max(int_track_ids)+1
-                    KalmanBoxTracker.id = 0
-                    mot_tracker.trackers.append(KalmanBoxTracker(dets[0],id=det_id))
-            
-            for frame in range(int(seq_dets[:,0].max())):
-                frame += 1 #detection and frame numbers begin at 1
-                dets = seq_dets[seq_dets[:, 0]==frame, 2:7]   # original setting: x,y,w,h top left width height
-                dets[:, 2:4] += dets[:, 0:2] #convert to [x1,y1,w,h] to [x1,y1,x2,y2]
-                trackers = mot_tracker.update(dets)
-
-                for d in trackers:
-                    track_results.append([frame,d[4],d[0],d[1],d[2]-d[0],d[3]-d[1]])
-            track_results = np.array(track_results).astype(int)
-
-            lf = LabelFile()
-            # Edit frame Shape and save
-            for jdx, json_path in enumerate(labelList):
-                loaded_label = LabelFile(json_path)
-                loaded_shape = loaded_label.shapes
-                frame = jdx+1
-                track_ids = track_results[track_results[:, 0]==frame,1]
-                track_xy = track_results[track_results[:, 0]==frame,2:4]
-                shape_xy = [loaded_shape[idx]['points'][0] for idx in range(len(loaded_shape))]
-
-                hungarian_matrix = []
-                for adx in range(len(shape_xy)):
-                    row = []
-                    for bdx in range(len(track_xy)):
-                        row.append( np.sum(np.abs(shape_xy[adx]-track_xy[bdx])) )
-                    hungarian_matrix.append(row)
-                shape_m,track_m = linear_sum_assignment(np.array(hungarian_matrix))
-
-                for idx in range(len(shape_xy)):
-                    loaded_shape[idx]['track_id'] = str(track_ids[track_m[idx]])
-                
-                imagePath = loaded_label.imagePath
-                lf.save(
-                    filename=json_path,
-                    shapes=loaded_shape,
-                    imagePath=imagePath,
-                    imageData=None,
-                    imageHeight=self.image.height(),
-                    imageWidth=self.image.width(),
-                    flags=loaded_label.flags,
-                    otherData=loaded_label.otherData,
-                )
-                
-            # repaint the current frame
-            self.informationMessage(
-                                "Track IDs",
-                                "ID Association is completed",
-                            )
+    def _reloadImportedAnnotations(self):
+        for index, image in enumerate(self.imageList):
+            path = osp.splitext(image)[0] + ".json"
+            if self.output_dir:
+                path = osp.join(self.output_dir, osp.basename(path))
+            self.fileListWidget.item(index).setCheckState(
+                Qt.Checked if osp.isfile(path) else Qt.Unchecked
+            )
+        keep_prev = self._config["keep_prev"]
+        self._config["keep_prev"] = False
+        self.ir_activated = False
+        try:
             self.loadFile(self.filename)
+        finally:
+            self._config["keep_prev"] = keep_prev
+
+    def importYOLO(self, _value=False):
+        if not self.imagePath:
+            self.errorMessage("Import YOLO", "Open an image or image directory first.")
+            return
+        if not self.mayContinue():
+            return
+        images = self.imageList or [self.imagePath]
+        dialog = YoloImportDialog(
+            parent=self, class_names=self._config["labels"], frame_count=len(images)
+        )
+        if not dialog.exec_():
+            return
+        options = dialog.options()
+        selected_images = images if options["sequence"] else [self.imagePath]
+        QtWidgets.QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            class_names = (
+                load_class_names(options["classes_file"])
+                if options["classes_file"] else self._config["labels"]
+            )
+            self.status(self.tr("Importing YOLO detections…"))
+            QtWidgets.QApplication.processEvents(QtCore.QEventLoop.ExcludeUserInputEvents)
+            result = import_yolo_annotations(
+                selected_images,
+                options["source"],
+                class_names,
+                output_dir=self.output_dir,
+                image_root=self.lastOpenDir,
+                overwrite=options["overwrite"],
+                track=options["track"],
+            )
+        except (OSError, ValueError, TypeError) as error:
+            self.errorMessage("Import YOLO", html.escape(str(error)))
+            return
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        self._config["labels"] = list(class_names)
+        for label in class_names:
+            self.labelDialog.addLabelHistory(label)
+            if self.uniqLabelList.findItemByLabel(label) is None:
+                item = self.uniqLabelList.createItemFromLabel(label)
+                self.uniqLabelList.addItem(item)
+                self.uniqLabelList.setItemLabel(item, label, self._get_rgb_by_label(label))
+        self._reloadImportedAnnotations()
+        message = "Imported {detections} detections across {frames} frames.".format(**result)
+        if result["missing"]:
+            message += " {} frames had no TXT file and were imported empty.".format(
+                result["missing"]
+            )
+        if result["tracked"]:
+            message += " SORT tracking IDs have been assigned."
+        else:
+            message += " Use Track > ID Association to assign tracking IDs."
+        self.informationMessage("Import YOLO", message)
+
+    def SORT(self, item=None):
+        images = self.imageList
+        if not images:
+            self.errorMessage("Track IDs", "Open an image directory before tracking.")
+            return
+        if not self.mayContinue():
+            return
+        dialog = TrackDialog(parent=self)
+        dialog.end_frame.setText(str(len(images)))
+        if not dialog.exec_() or not dialog.option_value:
+            return
+        start = 0
+        if dialog.option_value == 2:
+            current = osp.abspath(self.imagePath or "")
+            start = next(
+                (index for index, path in enumerate(images)
+                 if osp.abspath(path) == current),
+                None,
+            )
+            if start is None:
+                self.errorMessage("Track IDs", "Select a frame in the image directory.")
+                return
+        try:
+            end = int(dialog.end_frame.text() or len(images))
+            if not start < end <= len(images):
+                raise ValueError()
+        except ValueError:
+            self.errorMessage(
+                "Track IDs", "End Frame must be between {} and {}.".format(
+                    start + 1, len(images)
+                )
+            )
+            return
+        QtWidgets.QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            self.status(self.tr("Assigning tracking IDs…"))
+            QtWidgets.QApplication.processEvents(QtCore.QEventLoop.ExcludeUserInputEvents)
+            result = track_annotations(
+                images[start:end], output_dir=self.output_dir,
+                use_existing_ids=dialog.option_value == 2,
+            )
+        except (OSError, ValueError, TypeError) as error:
+            self.errorMessage("Track IDs", html.escape(str(error)))
+            return
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        self._reloadImportedAnnotations()
+        self.informationMessage(
+            "Track IDs", "Assigned tracking IDs to {detections} detections "
+            "across {frames} frames.".format(**result)
+        )
 
     def INTERPOLATION(self, item=None):
         dialog = InterpolationDialog(
@@ -2274,7 +2274,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.labelFile.flags is not None:
                 flags.update(self.labelFile.flags)
         self.loadFlags(flags)
-        if self._config["keep_prev"] and self.noShapes():       # check noShapes() /// Shapes are annotations
+        if self._config["keep_prev"] and self.noShapes() and self.labelFile is None:
             self.loadShapes(prev_shapes, replace=False)         # load annotation from prev image
             self.setDirty()
         elif self.ir_activated == True:

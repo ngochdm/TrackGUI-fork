@@ -18,7 +18,7 @@ class TrackDialog(QtWidgets.QDialog):
         row1.addWidget(self.end_frame)
 
         combobox = QtWidgets.QComboBox()
-        combobox.addItems(["SORT", "Byte-SORT", "OC-SORT"])
+        combobox.addItems(["SORT"])
         row2 = QtWidgets.QHBoxLayout()
         row2.addWidget(QtWidgets.QLabel("Methods:"))
         row2.addStretch()
@@ -40,6 +40,5 @@ class TrackDialog(QtWidgets.QDialog):
     def option2(self):
         self.option_value = 2
         self.accept()
-
 
 

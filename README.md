@@ -21,6 +21,7 @@ TrackMe annotation format is compatible with LabelMe annotation format (.json) w
 - Modify/Delete boxes of same info throughout a list of continuous frames.
 - Display homegeneous color for same object info (for the sake of multi-view object tracking).
 - Open native X-AnyLabeling JSON annotations alongside Labelme files.
+- Import YOLO detection TXT files and assign tracking IDs with SORT.
 
 ## Installation
 Please install Anaconda environment on your computer beforehand.
@@ -51,11 +52,48 @@ Saving writes TrackGUI/Labelme JSON and preserves image and shape metadata such
 as descriptions, review status, scores, difficulty, and attributes. Specialized
 X-AnyLabeling editing tools and 3D cuboids are not supported.
 
+### YOLO detection import and tracking
+
+1. Open your image sequence with **Open Dir**. Images are processed in the order
+   shown in the file list.
+2. Choose **File > Import YOLO Detections** (also available under **Track**).
+3. Select **Loaded image sequence** and its TXT folder, or **Current image** and
+   one TXT file. For sequences, TXT filenames must match image names, such as
+   `000001.txt` for `000001.jpg`. Mirrored subdirectories are supported.
+4. Choose `classes.txt` (one class per line) or a YOLO `data.yaml` with a `names`
+   list or mapping. Leave it blank to use the original order of `--labels`.
+5. Leave **Run SORT tracking after import** checked to assign IDs immediately,
+   or import boxes first and run **Track > ID Association** later.
+
+Each detection row uses normalized coordinates and an optional confidence:
+
+```text
+class_id center_x center_y width height [confidence]
+0 0.5 0.5 0.2 0.3
+1 0.25 0.4 0.1 0.2 0.95
+```
+
+Class IDs start at zero. Empty or missing TXT files in a sequence become empty
+frames; at least one TXT filename must match. Invalid rows report their filename
+and line, and all inputs are validated before annotations are written. Existing
+JSON files are protected unless **Replace existing JSON annotations** is checked.
+Imported JSON files go to the active **Output Dir**, or beside the images.
+The source TXT files are left intact.
+
+Tracking associates boxes within the same class, handles empty frames and newly
+appearing objects, and saves string `track_id` values in JSON. The original box
+coordinates and confidence scores are retained. This imports existing detection
+results; it does not run a YOLO model. Segmentation, pose, and oriented-box TXT
+formats are not supported.
+
 ## Note
-All frames must have labeled boxes
-+ Track from scratch: track from the first frame to the end frame with automatic ID assignment
-+ Track from Current Frame w/ Annotation: track from the current (being opened) frame with the modified ID or manual ID assignment
-+ Track from Current Frame w/0 Annotation: track from the current (being opened) frame with automatic ID assignment
+Each frame needs a JSON annotation for tracking; it may contain no boxes. YOLO
+sequence import creates these files automatically.
+
++ **Track from Scratch** starts at the first loaded frame and assigns fresh IDs.
++ **Track w/ Current Annotation** starts at the current frame, preserving its
+  existing IDs. Every box in that frame must have a unique nonnegative ID.
++ **End Frame** is the inclusive frame number in the loaded image list.
 
 ## Citation
 If you find our work helpful, please consider citing our paper:
