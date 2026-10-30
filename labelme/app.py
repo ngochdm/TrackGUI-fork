@@ -1293,7 +1293,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     with open(json_path) as file:
                         data = json.load(file)
 
-                    bboxes = [data['shapes'][i]['points'] for i in range(len(data['shapes']))]
+                    shapes = LabelFile.normalize_shapes(data["shapes"])
+                    bboxes = [shape["points"] for shape in shapes]
                     # need boxes in x,y,w,h
                     bboxes_xywh = [convert(bboxes[i]) for i in range(len(bboxes))]
 
@@ -1327,7 +1328,6 @@ class MainWindow(QtWidgets.QMainWindow):
             track_results = np.array(track_results).astype(int)
 
             lf = LabelFile()
-            flags = {}
             # Edit frame Shape and save
             for jdx, json_path in enumerate(labelList):
                 loaded_label = LabelFile(json_path)
@@ -1348,7 +1348,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 for idx in range(len(shape_xy)):
                     loaded_shape[idx]['track_id'] = str(track_ids[track_m[idx]])
                 
-                imagePath = osp.splitext(json_path)[0] + ".jpg"            
+                imagePath = loaded_label.imagePath
                 lf.save(
                     filename=json_path,
                     shapes=loaded_shape,
@@ -1356,7 +1356,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     imageData=None,
                     imageHeight=self.image.height(),
                     imageWidth=self.image.width(),
-                    flags=flags,
+                    flags=loaded_label.flags,
+                    otherData=loaded_label.otherData,
                 )
                 
             # repaint the current frame
@@ -1466,9 +1467,10 @@ class MainWindow(QtWidgets.QMainWindow):
                     data = json.load(file)
 
                 
-                bboxes = [data['shapes'][i]['points'] for i in range(len(data['shapes']))]
-                labels = [data['shapes'][i]['label'] for i in range(len(data['shapes']))]
-                track_ids = [data['shapes'][i]['track_id'] for i in range(len(data['shapes']))]
+                shapes = LabelFile.normalize_shapes(data["shapes"])
+                bboxes = [shape["points"] for shape in shapes]
+                labels = [shape["label"] for shape in shapes]
+                track_ids = [shape["track_id"] for shape in shapes]
                 # need boxes in x,y,w,h
                 bboxes_xyxy = [convert(bboxes[i]) for i in range(len(bboxes))]
                 picked_item = np.intersect1d(np.argwhere(np.array(track_ids)==self.ID_INPO),
@@ -1507,7 +1509,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     }
                     loaded_shape.append(newshape)
                     
-                    imagePath = osp.splitext(json_path)[0] + ".jpg"
+                    imagePath = loaded_label.imagePath
                     # import ipdb; ipdb.set_trace()          
                     lf.save(
                         filename=json_path,
@@ -1516,8 +1518,8 @@ class MainWindow(QtWidgets.QMainWindow):
                         imageData=None,
                         imageHeight=self.image.height(),
                         imageWidth=self.image.width(),
-                        otherData={},
-                        flags={},
+                        otherData=loaded_label.otherData,
+                        flags=loaded_label.flags,
                     )
                 else:
                     loaded_shape = []
@@ -1607,7 +1609,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 else:
                     new_shape.append(loaded_shape[kdx])
             
-            imagePath = osp.splitext(json_path)[0] + ".jpg"
+            imagePath = loaded_label.imagePath
                      
             lf.save(
                 filename=json_path,
@@ -1616,7 +1618,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 imageData=None,
                 imageHeight=self.image.height(),
                 imageWidth=self.image.width(),
-                flags={},
+                flags=loaded_label.flags,
+                otherData=loaded_label.otherData,
             )
         
         
@@ -1838,17 +1841,18 @@ class MainWindow(QtWidgets.QMainWindow):
             label_id = self.uniqLabelList.indexFromItem(item).row() + 1
             label_id += self._config["shift_auto_shape_color"]
             return LABEL_COLORMAP[label_id % len(LABEL_COLORMAP)]
-        elif (
-            self._config["shape_color"] == "manual"
-            and self._config["label_colors"]
-            # and label in self._config["label_colors"]
-        ):
-            # return self._config["label_colors"][label]
-            if label.split('_')[-1] == 'None':
-                return [224, 224,   0]
-            else:
-                return self._config["label_colors"][int(label.split('_')[-1])][int(label.split('_')[-1])]
-        elif self._config["default_shape_color"]:
+        elif self._config["shape_color"] == "manual" and self._config["label_colors"]:
+            suffix = label.rsplit("_", 1)[-1]
+            if suffix == "None":
+                return [224, 224, 0]
+            try:
+                track_id = int(suffix)
+                if track_id >= 0:
+                    return self._config["label_colors"][track_id][track_id]
+            except (ValueError, IndexError, KeyError):
+                # Plain class names and IDs missing from the palette use the default.
+                pass
+        if self._config["default_shape_color"]:
             return self._config["default_shape_color"]
         return (0, 255, 0)
 
@@ -1872,10 +1876,11 @@ class MainWindow(QtWidgets.QMainWindow):
             label = shape["label"]
             points = shape["points"]
             shape_type = shape["shape_type"]
-            flags = shape["flags"]
+            flags = shape["flags"] or {}
             description = shape.get("description", "")
             group_id = shape["group_id"]
-            track_id = shape["track_id"]
+            track_id = shape.get("track_id")
+            other_data = shape.get("other_data") or {}
 
             if not points:
                 # skip point-empty shape
@@ -1900,6 +1905,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 description=description,
                 mask=shape["mask"],
             )
+            shape.other_data = other_data.copy()
             for x, y in points:
                 shape.addPoint(QtCore.QPointF(x, y))
             shape.close()
@@ -1964,6 +1970,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 imageHeight=self.image.height(),
                 imageWidth=self.image.width(),
                 flags=flags,
+                otherData=self.otherData,
             )
             self.labelFile = lf
             items = self.fileListWidget.findItems(self.imagePath, Qt.MatchExactly)
@@ -2209,10 +2216,7 @@ class MainWindow(QtWidgets.QMainWindow):
         
         label_file = osp.splitext(filename)[0] + ".json"
         
-        if os.path.isfile(label_file):
-            self.ir_old_shapes = []
-            for item in LabelFile(label_file).shapes:
-                self.ir_old_shapes.append(item)
+        self.ir_old_shapes = []
         
         if self.output_dir:
             label_file_without_path = osp.basename(label_file)
@@ -2231,6 +2235,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 self.status(self.tr("Error reading %s") % label_file)
                 return False
+            self.ir_old_shapes = self.labelFile.shapes
             self.imageData = self.labelFile.imageData
             self.imagePath = osp.join(
                 osp.dirname(label_file),

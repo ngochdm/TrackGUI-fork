@@ -20,6 +20,7 @@ TrackMe annotation format is compatible with LabelMe annotation format (.json) w
 - Interpolate boxes in long video range in case no pre-defined detection boxes.
 - Modify/Delete boxes of same info throughout a list of continuous frames.
 - Display homegeneous color for same object info (for the sake of multi-view object tracking).
+- Open native X-AnyLabeling JSON annotations alongside Labelme files.
 
 ## Installation
 Please install Anaconda environment on your computer beforehand.
@@ -31,6 +32,24 @@ pip install -e . <br>
 ## Usage
 conda activate trackGUI <br>
 labelme
+
+### X-AnyLabeling annotations
+
+Open an X-AnyLabeling `.json` file or its image directory with the usual Open/Open
+Dir actions or `labelme /path/to/annotations`. No conversion command is needed.
+Images referenced by `imagePath` are resolved relative to the JSON file; embedded
+image data is also supported.
+
+Four-corner rectangles are imported as TrackGUI's two-corner boxes. For files
+identified by X-AnyLabeling shape fields or geometry, `group_id` also supplies
+the tracking ID when `track_id` is absent. Explicit tracking IDs, including null,
+take precedence; ordinary Labelme group IDs retain their grouping behavior.
+IDs without a configured color use the default shape color.
+
+Rotated boxes and quadrilaterals are imported as polygons with the same outline.
+Saving writes TrackGUI/Labelme JSON and preserves image and shape metadata such
+as descriptions, review status, scores, difficulty, and attributes. Specialized
+X-AnyLabeling editing tools and 3D cuboids are not supported.
 
 ## Note
 All frames must have labeled boxes

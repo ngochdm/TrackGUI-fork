@@ -14,6 +14,7 @@ from labelme.logger import logger
 
 PIL.Image.MAX_IMAGE_PIXELS = None
 
+
 @contextlib.contextmanager
 def open(name, mode):
     assert mode in ["r", "w"]
@@ -22,8 +23,8 @@ def open(name, mode):
         encoding = None
     else:
         encoding = "utf-8"
-    yield io.open(name, mode, encoding=encoding)
-    return
+    with io.open(name, mode, encoding=encoding) as stream:
+        yield stream
 
 
 class LabelFileError(Exception):
@@ -64,6 +65,75 @@ class LabelFile(object):
             f.seek(0)
             return f.read()
 
+    @staticmethod
+    def normalize_shapes(shapes):
+        """Read Labelme and X-AnyLabeling shapes into TrackGUI's representation."""
+        shape_keys = {
+            "label",
+            "points",
+            "group_id",
+            "track_id",
+            "shape_type",
+            "flags",
+            "description",
+            "mask",
+            "other_data",
+        }
+        xany_fields = {"score", "difficult", "direction", "attributes", "kie_linking"}
+        is_xanylabeling = any(
+            xany_fields.intersection(shape)
+            or shape.get("shape_type") in ("rotation", "quadrilateral")
+            or (shape.get("shape_type") == "rectangle" and len(shape["points"]) == 4)
+            for shape in shapes
+        )
+        normalized = []
+        for shape in shapes:
+            points = shape["points"]
+            shape_type = shape.get("shape_type") or "polygon"
+            if shape_type == "rectangle" and len(points) == 4:
+                xs, ys = zip(*points)
+                points = [[min(xs), min(ys)], [max(xs), max(ys)]]
+            elif shape_type in ("rotation", "quadrilateral"):
+                # Preserve the outline using the existing polygon editor.
+                shape_type = "polygon"
+            if shape_type not in (
+                "polygon",
+                "rectangle",
+                "point",
+                "line",
+                "circle",
+                "linestrip",
+                "points",
+                "mask",
+            ):
+                raise ValueError("Unsupported shape_type: {}".format(shape_type))
+            track_id = shape.get("track_id")
+            if "track_id" not in shape and is_xanylabeling:
+                group_id = shape.get("group_id")
+                track_id = str(group_id) if group_id is not None else None
+            other_data = dict(shape.get("other_data") or {})
+            other_data.update(
+                (key, value) for key, value in shape.items() if key not in shape_keys
+            )
+            normalized.append(
+                dict(
+                    label=shape["label"],
+                    points=points,
+                    shape_type=shape_type,
+                    flags=shape.get("flags") or {},
+                    description=shape.get("description"),
+                    group_id=shape.get("group_id"),
+                    track_id=track_id,
+                    mask=(
+                        utils.img_b64_to_arr(shape["mask"])
+                        if shape.get("mask")
+                        else None
+                    ),
+                    other_data=other_data,
+                )
+            )
+        return normalized
+
     def load(self, filename):
         keys = [
             "version",
@@ -74,53 +144,33 @@ class LabelFile(object):
             "imageHeight",
             "imageWidth",
         ]
-        shape_keys = [
-            "label",
-            "points",
-            "group_id",
-            "track_id",
-            "shape_type",
-            "flags",
-            "description",
-            "mask",
-        ]
         try:
             with open(filename, "r") as f:
                 data = json.load(f)
 
-            if data["imageData"] is not None:
+            imagePath = data["imagePath"]
+            if data.get("imageData") is not None:
                 imageData = base64.b64decode(data["imageData"])
                 if PY2 and QT4:
                     imageData = utils.img_data_to_png_data(imageData)
             else:
-                # relative path from label file to relative path from cwd
-                if osp.isfile(data["imagePath"]):
-                    imagePath = osp.join(osp.dirname(filename), data["imagePath"])
-                    imageData = self.load_image_file(imagePath)
-                else:
-                    imagePath = filename.split('.json')[0] + '.jpg'
-                    imageData = self.load_image_file(imagePath)
+                resolved_path = osp.join(osp.dirname(filename), imagePath)
+                if not osp.isfile(resolved_path):
+                    # Retain support for moved datasets with same-stem JPEGs.
+                    fallback_path = osp.splitext(filename)[0] + ".jpg"
+                    if osp.isfile(fallback_path):
+                        resolved_path = fallback_path
+                        imagePath = osp.basename(fallback_path)
+                imageData = self.load_image_file(resolved_path)
+                if imageData is None:
+                    raise ValueError("Failed opening image file: {}".format(resolved_path))
             flags = data.get("flags") or {}
-            imagePath = data["imagePath"]
             self._check_image_height_and_width(
                 base64.b64encode(imageData).decode("utf-8"),
                 data.get("imageHeight"),
                 data.get("imageWidth"),
             )
-            shapes = [
-                dict(
-                    label=s["label"],
-                    points=s["points"],
-                    shape_type=s.get("shape_type", "polygon"),
-                    flags=s.get("flags", {}),
-                    description=s.get("description"),
-                    group_id=s.get("group_id"),
-                    track_id=s.get("track_id"),
-                    mask=utils.img_b64_to_arr(s["mask"]) if s.get("mask") else None,
-                    # other_data={k: v for k, v in s.items() if k not in shape_keys},
-                )
-                for s in data["shapes"]
-            ]
+            shapes = self.normalize_shapes(data["shapes"])
         except Exception as e:
             raise LabelFileError(e)
 
@@ -174,10 +224,17 @@ class LabelFile(object):
             otherData = {}
         if flags is None:
             flags = {}
+        serialized_shapes = []
+        for shape in shapes:
+            serialized_shape = dict(shape.get("other_data") or {})
+            serialized_shape.update(
+                (key, value) for key, value in shape.items() if key != "other_data"
+            )
+            serialized_shapes.append(serialized_shape)
         data = dict(
             version=__version__,
             flags=flags,
-            shapes=shapes,
+            shapes=serialized_shapes,
             imagePath=imagePath,
             imageData=imageData,
             imageHeight=imageHeight,
